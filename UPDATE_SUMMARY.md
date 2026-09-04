@@ -271,4 +271,4 @@ All architecture, API, and examples are now updated. You can start implementing 
 
 See [API_SPEC.md](./docs/API_SPEC.md) for complete reference.
 See [EXAMPLES.md](./docs/EXAMPLES.md) for 8 real workflows.
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for system design.
+See [ARCHITECTURE.md](./docs/ARCHITECTURE.md) for system design.

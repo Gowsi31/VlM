@@ -673,4 +673,4 @@ That visual-native orchestration enables simpler, more reliable visual workflows
 
 See [PLANNING.md](./PLANNING.md) for implementation roadmap.
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for technical design.
-See [docs/API_SPEC.md](./docs/API_SPEC.md) for developer API.
+See [docs/API_SPEC.md](./API_SPEC.md) for developer API.

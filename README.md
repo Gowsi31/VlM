@@ -75,7 +75,7 @@ print(result)
 
 ## Documentation
 
-- **[Architecture](./ARCHITECTURE.md)** — Technical deep dive
+- **[Architecture](./docs/ARCHITECTURE.md)** — Technical deep dive
 - **[API Reference](./docs/API_SPEC.md)** — Complete API
 - **[Examples](./docs/EXAMPLES.md)** — 5 real workflows
 - **[Schemas](./docs/SCHEMAS.md)** — Data structures
@@ -193,7 +193,7 @@ Image → VisionNode → VisualState
       ActionNode → Result
 ```
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for full details.
+See [ARCHITECTURE.md](./docs/ARCHITECTURE.md) for full details.
 
 ## Status
 

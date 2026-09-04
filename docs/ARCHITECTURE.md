@@ -662,4 +662,4 @@ Performance Tests (latency, memory)
 
 ---
 
-See [API_SPEC.md](./docs/API_SPEC.md) for complete API reference.
+See [API_SPEC.md](./API_SPEC.md) for complete API reference.

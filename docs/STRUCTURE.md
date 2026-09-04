@@ -213,4 +213,4 @@ Everything is structured and documented. You're ready to:
 
 ---
 
-See [project.md](./project.md) for the full roadmap.
+See [project.md](../project.md) for the full roadmap.

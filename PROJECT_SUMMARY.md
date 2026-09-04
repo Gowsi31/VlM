@@ -499,8 +499,8 @@ That's the framework you're building.
 **Let's build it.** 🚀
 
 See specific docs for details:
-- [CORE_THESIS.md](./CORE_THESIS.md) — Philosophy & differentiation
-- [PLANNING.md](./PLANNING.md) — Detailed roadmap
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — Technical design
+- [CORE_THESIS.md](./docs/CORE_THESIS.md) — Philosophy & differentiation
+- [PLANNING.md](./docs/PLANNING.md) — Detailed roadmap
+- [ARCHITECTURE.md](./docs/ARCHITECTURE.md) — Technical design
 - [docs/API_SPEC.md](./docs/API_SPEC.md) — Complete API
 - [docs/EXAMPLES.md](./docs/EXAMPLES.md) — Real workflows
