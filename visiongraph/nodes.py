@@ -1,18 +1,76 @@
 """Node base class and the V0.1 node types: VisionNode, ToolNode, DecisionNode,
 ReasoningNode, ActionNode, HumanNode.
 
-Nodes that need an external backend (a VLM call, an LLM call, a click/type
-executor, a human prompt) take it as an injected callable (`infer_fn`,
-`reasoning_fn`, `action_fn`, `tool_fn`, `approve_fn`). Without one, the node
-falls back to a clearly-labeled stub so a graph can be wired and run
-end-to-end before any real backend is plugged in.
+Nodes that need an external backend (a VLM adapter, an LLM call, a
+click/type executor, a human prompt) take it as an injected callable or
+adapter (`adapter`, `reasoning_fn`, `action_fn`, `tool_fn`, `approve_fn`).
+Without one, the node falls back to a clearly-labeled stub so a graph can
+be wired and run end-to-end before any real backend is plugged in.
 """
 
 from __future__ import annotations
 
+import io
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from PIL import Image
+
+from visiongraph.adapters import VLMAdapter, VLMResponse, VLMResponseError, extract_structured_json
 from visiongraph.state import DetectedObject, GraphState, VisualState
+
+
+def to_pil_image(image: Any) -> Image.Image:
+    """Normalizes whatever GraphState.image holds into a PIL.Image.Image.
+    This is the one place that happens - adapters only ever see a real
+    PIL image, never a path/bytes, so every backend shares the same input
+    contract."""
+    if isinstance(image, Image.Image):
+        return image
+    if isinstance(image, (str, Path)):
+        return Image.open(image)
+    if isinstance(image, bytes):
+        return Image.open(io.BytesIO(image))
+    raise TypeError(f"Cannot convert {type(image)} to PIL.Image.Image")
+
+
+def default_free_text_parse_fn(response: VLMResponse) -> VisualState:
+    """Used when VisionNode(structured_output=False) (the default). Never
+    inspects response.text for embedded JSON - a stray '{' in ordinary
+    prose (a quoted sign, a code snippet the model described, ...) is not
+    evidence the model was attempting structured output, so it must not be
+    treated as one. Whether JSON parsing is even attempted is the caller's
+    explicit choice (structured_output), not something inferred from the
+    response body."""
+    return VisualState(scene_description=response.text)
+
+
+def default_structured_parse_fn(response: VLMResponse) -> VisualState:
+    """Used when VisionNode(structured_output=True) - the caller has
+    explicitly said this prompt asks for structured output. Uses
+    response.structured if the adapter already provided validated
+    structured output (Mode C); otherwise best-effort extracts JSON
+    embedded in the free-text response (Mode B); otherwise falls back to
+    free text alone (the model was asked for JSON but didn't produce any)."""
+    structured = response.structured
+    if structured is None:
+        structured = extract_structured_json(response.text)
+
+    if structured is None:
+        return VisualState(scene_description=response.text)
+
+    if not isinstance(structured.get("objects"), list):
+        raise VLMResponseError(f"Structured output missing a valid 'objects' list: {structured!r}")
+
+    objects = [
+        DetectedObject(**obj) if isinstance(obj, dict) else obj for obj in structured["objects"]
+    ]
+    return VisualState(
+        objects=objects,
+        scene_description=structured.get("scene", response.text),
+        text_content=structured.get("text", []),
+        confidence=structured.get("confidence", 0.0),
+    )
 
 
 class Node:
@@ -33,52 +91,45 @@ class Node:
 
 
 class VisionNode(Node):
-    """Visual perception: calls a VLM (via infer_fn) and produces a VisualState."""
+    """Visual perception: calls a VLMAdapter and produces a VisualState.
+
+    image normalization (to_pil_image) and VLMResponse -> VisualState
+    conversion (parse_fn) both happen here - the adapter only ever talks to
+    the provider and returns a VLMResponse.
+    """
 
     def __init__(
         self,
         prompt: str,
-        output_format: str = "json",
+        adapter: Optional[VLMAdapter] = None,
+        structured_output: bool = False,
+        parse_fn: Optional[Callable[[VLMResponse], VisualState]] = None,
         vision_tools: Optional[List[str]] = None,
-        infer_fn: Optional[Callable[[Any, str], Any]] = None,
         name: Optional[str] = None,
     ):
-        super().__init__(name, {"prompt": prompt, "output_format": output_format})
+        super().__init__(name, {"prompt": prompt, "structured_output": structured_output})
         self.prompt = prompt
-        self.output_format = output_format
+        self.adapter = adapter
+        self.structured_output = structured_output
+        default_fn = default_structured_parse_fn if structured_output else default_free_text_parse_fn
+        self.parse_fn = parse_fn or default_fn
         self.vision_tools = vision_tools or []
-        self.infer_fn = infer_fn
 
     def execute(self, state: GraphState) -> GraphState:
-        if self.infer_fn is not None:
-            result = self.infer_fn(state.image, self.prompt)
+        if self.adapter is not None:
+            image = to_pil_image(state.image)
+            response = self.adapter.generate(image, self.prompt)
+            if not isinstance(response, VLMResponse):
+                raise TypeError(
+                    f"VisionNode adapter must return a VLMResponse, got {type(response)}"
+                )
         else:
-            result = VisualState(
-                scene_description="[no VLM backend configured]",
-                confidence=0.0,
-            )
+            response = VLMResponse(text="[no VLM backend configured]")
 
-        visual_state = self._to_visual_state(result)
+        visual_state = self.parse_fn(response)
         return state.update(visual_state=visual_state).log_step(
             self.name, summary=visual_state.scene_description
         )
-
-    @staticmethod
-    def _to_visual_state(result: Any) -> VisualState:
-        if isinstance(result, VisualState):
-            return result
-        if isinstance(result, dict):
-            objects = [
-                DetectedObject(**obj) if isinstance(obj, dict) else obj
-                for obj in result.get("objects", [])
-            ]
-            return VisualState(
-                objects=objects,
-                scene_description=result.get("scene_description", result.get("scene", "")),
-                text_content=result.get("text_content", result.get("text", [])),
-                confidence=result.get("confidence", 0.0),
-            )
-        raise TypeError(f"VisionNode infer_fn must return a VisualState or dict, got {type(result)}")
 
 
 class ToolNode(Node):

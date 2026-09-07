@@ -1,7 +1,9 @@
 """Tests for the V0.1 core loop: state.py, nodes.py, graph.py."""
 
 import pytest
+from PIL import Image
 
+from visiongraph.adapters import CallableVLMAdapter, VLMResponse, VLMResponseError
 from visiongraph.state import DetectedObject, GraphState, VisualState
 from visiongraph.nodes import (
     ActionNode,
@@ -10,8 +12,11 @@ from visiongraph.nodes import (
     ReasoningNode,
     ToolNode,
     VisionNode,
+    to_pil_image,
 )
 from visiongraph.graph import VisionGraph
+
+A_PIXEL = Image.new("RGB", (2, 2))  # stand-in "real" image for adapter-backed tests
 
 
 # ---------------------------------------------------------------------------
@@ -59,38 +64,133 @@ class TestVisionNode:
         assert result.visual_state.confidence == 0.0
         assert result.history[-1].node_name == "VisionNode"
 
-    def test_custom_infer_fn_returning_dict_is_parsed_into_visual_state(self):
-        def fake_infer(image, prompt):
-            return {
-                "objects": [{"type": "button", "label": "Submit", "confidence": 0.9}],
-                "scene": "Login form",
-                "text": ["Username", "Password"],
-                "confidence": 0.87,
-            }
+    def test_custom_adapter_returning_structured_response_is_parsed_into_visual_state(self):
+        def fake_generate(image, prompt):
+            return VLMResponse(
+                text="Login form",
+                structured={
+                    "scene": "Login form",
+                    "objects": [{"type": "button", "label": "Submit", "confidence": 0.9}],
+                    "text": ["Username", "Password"],
+                },
+            )
 
-        node = VisionNode(prompt="Describe the scene", infer_fn=fake_infer)
-        result = node.execute(GraphState(image="frame.png"))
+        node = VisionNode(
+            prompt="Describe the scene",
+            adapter=CallableVLMAdapter(fake_generate),
+            structured_output=True,
+        )
+        result = node.execute(GraphState(image=A_PIXEL))
 
         vs = result.visual_state
         assert vs.scene_description == "Login form"
-        assert vs.confidence == 0.87
         assert vs.text_content == ["Username", "Password"]
         assert len(vs.objects) == 1
         assert isinstance(vs.objects[0], DetectedObject)
         assert vs.objects[0].label == "Submit"
 
-    def test_custom_infer_fn_returning_visual_state_passes_through(self):
-        vs = VisualState(scene_description="raw state")
-        node = VisionNode(prompt="p", infer_fn=lambda image, prompt: vs)
-        result = node.execute(GraphState())
+    def test_structured_output_false_never_attempts_json_parsing(self):
+        """Regression test for the false positive found during review: a
+        stray brace in ordinary prose must not be treated as an attempted
+        (and failed) structured response when structured_output=False."""
+        text = 'The sign reads "Open {24 hours}" above the door.'
+        node = VisionNode(
+            prompt="p",
+            adapter=CallableVLMAdapter(lambda image, prompt: VLMResponse(text=text)),
+        )
+        result = node.execute(GraphState(image=A_PIXEL))
 
-        assert result.visual_state is vs
+        assert result.visual_state.scene_description == text
+        assert result.visual_state.objects == []
 
-    def test_invalid_infer_fn_return_type_raises(self):
-        node = VisionNode(prompt="p", infer_fn=lambda image, prompt: 42)
+    def test_structured_output_false_ignores_response_structured(self):
+        """structured_output reflects what the caller asked for, not what
+        the adapter happened to provide - even a populated
+        response.structured is ignored when the flag is False."""
+        node = VisionNode(
+            prompt="Describe the scene",
+            adapter=CallableVLMAdapter(
+                lambda image, prompt: VLMResponse(
+                    text="a lion",
+                    structured={"scene": "structured scene", "objects": [{"type": "animal", "label": "lion"}]},
+                )
+            ),
+        )
+        result = node.execute(GraphState(image=A_PIXEL))
+
+        assert result.visual_state.scene_description == "a lion"
+        assert result.visual_state.objects == []
+
+    def test_custom_parse_fn_overrides_default_conversion(self):
+        custom_vs = VisualState(scene_description="raw state")
+        node = VisionNode(
+            prompt="p",
+            adapter=CallableVLMAdapter(lambda image, prompt: VLMResponse(text="x")),
+            parse_fn=lambda response: custom_vs,
+        )
+        result = node.execute(GraphState(image=A_PIXEL))
+
+        assert result.visual_state is custom_vs
+
+    def test_adapter_returning_non_vlmresponse_raises_type_error(self):
+        node = VisionNode(prompt="p", adapter=CallableVLMAdapter(lambda image, prompt: 42))
 
         with pytest.raises(TypeError):
-            node.execute(GraphState())
+            node.execute(GraphState(image=A_PIXEL))
+
+    def test_free_text_response_with_no_structured_output_yields_empty_objects(self):
+        node = VisionNode(
+            prompt="p",
+            adapter=CallableVLMAdapter(lambda image, prompt: VLMResponse(text="A lion in the grass.")),
+        )
+        result = node.execute(GraphState(image=A_PIXEL))
+
+        assert result.visual_state.scene_description == "A lion in the grass."
+        assert result.visual_state.objects == []
+
+    def test_truncated_structured_output_raises_vlm_response_error(self):
+        """Mirrors the real Phi-3.5-Vision failure observed in Colab: the
+        model starts a JSON object and never closes it."""
+        truncated = '{"scene": "a UI screen", "objects": [{"type": "button"'
+        node = VisionNode(
+            prompt="p",
+            adapter=CallableVLMAdapter(lambda image, prompt: VLMResponse(text=truncated)),
+            structured_output=True,
+        )
+
+        with pytest.raises(VLMResponseError):
+            node.execute(GraphState(image=A_PIXEL))
+
+    def test_normalizes_image_before_calling_adapter(self, tmp_path):
+        image_path = tmp_path / "frame.png"
+        Image.new("RGB", (3, 3)).save(image_path)
+        received = {}
+
+        def fake_generate(image, prompt):
+            received["type"] = type(image)
+            return VLMResponse(text="ok")
+
+        node = VisionNode(prompt="p", adapter=CallableVLMAdapter(fake_generate))
+        node.execute(GraphState(image=str(image_path)))
+
+        assert received["type"] is Image.Image or issubclass(received["type"], Image.Image)
+
+
+class TestToPilImage:
+    def test_passes_through_an_existing_pil_image(self):
+        assert to_pil_image(A_PIXEL) is A_PIXEL
+
+    def test_opens_a_path_string(self, tmp_path):
+        image_path = tmp_path / "frame.png"
+        Image.new("RGB", (3, 3)).save(image_path)
+
+        result = to_pil_image(str(image_path))
+
+        assert isinstance(result, Image.Image)
+
+    def test_rejects_unsupported_type(self):
+        with pytest.raises(TypeError):
+            to_pil_image(12345)
 
 
 class TestReasoningNode:
@@ -278,20 +378,33 @@ class TestConditionalRouting:
 
     @staticmethod
     def _build_graph(button_present: bool) -> VisionGraph:
-        def fake_infer(image, prompt):
+        def fake_generate(image, prompt):
             if button_present:
-                return {
-                    "objects": [{"type": "button", "label": "Submit", "confidence": 0.95}],
-                    "scene": "form with a visible submit button",
-                }
-            return {"objects": [], "scene": "form with no button visible"}
+                return VLMResponse(
+                    text="form with a visible submit button",
+                    structured={
+                        "scene": "form with a visible submit button",
+                        "objects": [{"type": "button", "label": "Submit", "confidence": 0.95}],
+                    },
+                )
+            return VLMResponse(
+                text="form with no button visible",
+                structured={"scene": "form with no button visible", "objects": []},
+            )
 
         def decide_logic(state):
             found = any(obj.type == "button" for obj in state.visual_state.objects)
             return "action" if found else "reasoning"
 
         graph = VisionGraph(name="routing-test")
-        graph.add_node("vision", VisionNode(prompt="Find the submit button", infer_fn=fake_infer))
+        graph.add_node(
+            "vision",
+            VisionNode(
+                prompt="Find the submit button",
+                adapter=CallableVLMAdapter(fake_generate),
+                structured_output=True,
+            ),
+        )
         graph.add_node("decide", DecisionNode(logic=decide_logic))
         graph.add_node("action", ActionNode(action_type="click"))
         graph.add_node("reasoning", ReasoningNode(prompt="Why is the button missing?"))
@@ -299,7 +412,7 @@ class TestConditionalRouting:
         return graph.compile()
 
     def test_button_found_branches_to_action(self):
-        final = self._build_graph(button_present=True).run(image="screenshot.png")
+        final = self._build_graph(button_present=True).run(image=A_PIXEL)
 
         assert [h.node_name for h in final.history] == ["VisionNode", "DecisionNode", "ActionNode"]
         assert len(final.actions_taken) == 1
@@ -308,7 +421,7 @@ class TestConditionalRouting:
         assert final.reasoning == ""
 
     def test_button_missing_branches_to_reasoning(self):
-        final = self._build_graph(button_present=False).run(image="screenshot.png")
+        final = self._build_graph(button_present=False).run(image=A_PIXEL)
 
         assert [h.node_name for h in final.history] == ["VisionNode", "DecisionNode", "ReasoningNode"]
         assert final.reasoning == "[no reasoning backend configured]"
@@ -320,9 +433,9 @@ class TestConditionalRouting:
 # Verification loop: Vision -> Decision -> Action -> Vision -> Decision -> stop
 #
 # No VerificationNode class. "Verify the action worked" is just: re-run the
-# same VisionNode, then let a DecisionNode inspect the new VisualState.
-# This also doubles as the contract test for swapping infer_fn for a real
-# VLM later: infer_fn(image, prompt) -> dict(objects=[...], scene=str, ...).
+# same VisionNode, then let a DecisionNode inspect the new VisualState. This
+# also doubles as the contract test for swapping the adapter for a real VLM
+# later: adapter.generate(image, prompt) -> VLMResponse.
 # ---------------------------------------------------------------------------
 
 
@@ -330,36 +443,49 @@ class TestVerificationLoop:
     def test_retries_action_then_stops_once_observation_shows_success(self):
         calls = {"n": 0}
 
-        def fake_vlm_infer(image, prompt):
-            """Stands in for a real VLM call (e.g. Phi-3.5-Vision). First
+        def fake_generate(image, prompt):
+            """Stands in for a real VLM adapter (e.g. PhiAdapter). First
             observation shows a login error; every observation after the
-            retry action shows success. Swapping this for a real model
+            retry action shows success. Swapping this for a real adapter
             later should require no changes to VisionNode/DecisionNode/
             ActionNode or how the graph is wired."""
             calls["n"] += 1
             if calls["n"] == 1:
-                return {
-                    "objects": [{"type": "error", "label": "Invalid password", "confidence": 0.91}],
-                    "scene": "login form showing an error",
-                }
-            return {
-                "objects": [{"type": "success", "label": "Dashboard loaded", "confidence": 0.97}],
-                "scene": "logged in successfully",
-            }
+                return VLMResponse(
+                    text="login form showing an error",
+                    structured={
+                        "scene": "login form showing an error",
+                        "objects": [{"type": "error", "label": "Invalid password", "confidence": 0.91}],
+                    },
+                )
+            return VLMResponse(
+                text="logged in successfully",
+                structured={
+                    "scene": "logged in successfully",
+                    "objects": [{"type": "success", "label": "Dashboard loaded", "confidence": 0.97}],
+                },
+            )
 
         def decide_logic(state):
             has_error = any(obj.type == "error" for obj in state.visual_state.objects)
             return "action" if has_error else None  # None = no override, let the graph stop
 
         graph = VisionGraph(name="login-retry")
-        graph.add_node("vision", VisionNode(prompt="What's the login state?", infer_fn=fake_vlm_infer))
+        graph.add_node(
+            "vision",
+            VisionNode(
+                prompt="What's the login state?",
+                adapter=CallableVLMAdapter(fake_generate),
+                structured_output=True,
+            ),
+        )
         graph.add_node("decide", DecisionNode(logic=decide_logic))
         graph.add_node("action", ActionNode(action_type="click_retry"))
         graph.connect("vision", "decide")
         graph.connect("action", "vision")  # loop back: re-observe after acting
         graph = graph.compile()
 
-        final = graph.run(prompt="What's the login state?", max_steps=10)
+        final = graph.run(image=A_PIXEL, prompt="What's the login state?", max_steps=10)
 
         assert calls["n"] == 2  # observed once before the retry, once after
         assert [h.node_name for h in final.history] == [
