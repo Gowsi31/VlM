@@ -24,6 +24,46 @@ A_PIXEL = Image.new("RGB", (2, 2))  # stand-in "real" image for adapter-backed t
 # ---------------------------------------------------------------------------
 
 
+class TestDetectedObjectState:
+    """The optional `state` field added for verification/diffing. Must not
+    disturb any existing DetectedObject construction path."""
+
+    def test_defaults_to_none(self):
+        obj = DetectedObject(type="button", label="Submit")
+
+        assert obj.state is None
+
+    def test_can_be_set_explicitly(self):
+        obj = DetectedObject(type="calendar", label="7", state="selected")
+
+        assert obj.state == "selected"
+
+    def test_existing_dict_unpack_construction_still_works_without_state(self):
+        # Exactly how default_structured_parse_fn builds DetectedObject from
+        # a VLM's JSON output - must keep working for responses that don't
+        # mention state at all.
+        obj = DetectedObject(**{"type": "button", "label": "Submit", "confidence": 0.9})
+
+        assert obj.state is None
+        assert obj.label == "Submit"
+
+    def test_dict_unpack_construction_can_include_state(self):
+        obj = DetectedObject(**{"type": "calendar", "label": "8", "state": "unselected"})
+
+        assert obj.state == "unselected"
+
+    def test_state_can_transition_from_none_to_a_value_and_back(self):
+        # Valid transitions given state is optional: None -> "selected" and
+        # "selected" -> None both need to be representable.
+        before = DetectedObject(type="calendar", label="7", state=None)
+        after = DetectedObject(type="calendar", label="7", state="selected")
+        assert before.state is None
+        assert after.state == "selected"
+
+        reverted = DetectedObject(type="calendar", label="7", state=None)
+        assert reverted.state is None
+
+
 class TestGraphState:
     def test_update_returns_new_instance_without_mutating_original(self):
         state = GraphState(prompt="hello")

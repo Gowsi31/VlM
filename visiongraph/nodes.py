@@ -17,7 +17,11 @@ from typing import Any, Callable, Dict, List, Optional
 from PIL import Image
 
 from visiongraph.adapters import VLMAdapter, VLMResponse, VLMResponseError, extract_structured_json
+from visiongraph.diff import diff_visual_states
 from visiongraph.state import DetectedObject, GraphState, VisualState
+
+_VERIFICATION_BASELINE_KEY = "_verification_baseline"
+_VERIFICATION_DIFF_KEY = "verification_diff"
 
 
 def to_pil_image(image: Any) -> Image.Image:
@@ -240,3 +244,31 @@ class HumanNode(Node):
 
         memory = {**state.memory, "human_approved": approved}
         return state.update(memory=memory).log_step(self.name, summary=f"approved={approved}")
+
+
+class VerificationNode(Node):
+    """Compares the current VisualState against the previous one it saw and
+    records a VisualStateDiff. No pluggable backend - this is pure local
+    computation, not something that talks to the outside world.
+
+    Drop the same VerificationNode instance into the graph after every
+    observation in a loop: the first time there's nothing to compare
+    against yet (verification_diff is None, the baseline is just recorded);
+    every time after that it produces a real diff against what it saw last.
+    """
+
+    def execute(self, state: GraphState) -> GraphState:
+        previous = state.memory.get(_VERIFICATION_BASELINE_KEY)
+        current = state.visual_state
+
+        diff = diff_visual_states(previous, current) if previous is not None else None
+
+        memory = {**state.memory, _VERIFICATION_BASELINE_KEY: current, _VERIFICATION_DIFF_KEY: diff}
+        if diff is None:
+            summary = "baseline captured, nothing to compare yet"
+        else:
+            summary = (
+                f"added={len(diff.added)} removed={len(diff.removed)} "
+                f"state_changes={len(diff.state_changes)}"
+            )
+        return state.update(memory=memory).log_step(self.name, summary=summary)

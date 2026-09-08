@@ -16,6 +16,7 @@ class DetectedObject:
     confidence: float = 0.0
     description: str = ""
     bbox: Optional[Tuple[int, int, int, int]] = None  # (x, y, w, h)
+    state: Optional[str] = None  # e.g. "selected" / "unselected" - element state, not object identity
 
 
 @dataclass(frozen=True)
